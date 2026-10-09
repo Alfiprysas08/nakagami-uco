@@ -1,0 +1,174 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+        : null;
+    }
+
+    function isAdmin() {
+      return role() == "admin";
+    }
+
+    function isRanger() {
+      return role() == "ranger";
+    }
+
+    function isStaff() {
+      return isAdmin() || isRanger();
+    }
+
+    function ownsAudit(data) {
+      return data.createdBy == request.auth.uid
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.deletedAt == null;
+    }
+
+    function keepsCreateAudit() {
+      return request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    function validMitra(data) {
+      return data.namaMitra is string
+        && data.tipeMitra is string
+        && data.namaPerson is string
+        && data.noHpPerson is string
+        && data.status in ["aktif", "potensi", "reject"]
+        && data.catatan is string;
+    }
+
+    function validCollection(data) {
+      return data.tanggal is string
+        && data.mitraId is string
+        && data.mitraName is string
+        && data.quantity is number
+        && data.quantity > 0
+        && data.hargaSatuan is number
+        && data.hargaSatuan >= 0
+        && data.totalHarga == data.quantity * data.hargaSatuan
+        && data.statusPembayaran in ["paid", "unpaid"];
+    }
+
+    function validMovement(data) {
+      return data.tanggal is string
+        && data.type in ["in", "out"]
+        && data.quantity is number
+        && data.quantity > 0
+        && data.sourceType in ["collection", "manual", "correction"]
+        && data.sourceId is string
+        && data.description is string;
+    }
+
+    function validFieldExpense(data) {
+      return data.tanggal is string
+        && data.namaPengeluaran is string
+        && data.amount is number
+        && data.amount > 0
+        && data.transactionId is string;
+    }
+
+    function validTransaction(data) {
+      return data.tanggal is string
+        && data.tipe in ["income", "outcome"]
+        && data.deskripsi is string
+        && data.amount is number
+        && data.amount > 0
+        && data.paymentMethod is string
+        && data.status in ["paid", "pending"]
+        && data.sourceType in ["manual", "field_expense", "collection"]
+        && data.sourceId is string;
+    }
+
+    function matchesFieldExpenseTransaction(data, transactionId) {
+      return data.sourceType == "field_expense"
+        && data.tipe == "outcome"
+        && data.sourceId is string
+        && getAfter(/databases/$(database)/documents/field_expenses/$(data.sourceId)).data.transactionId == transactionId
+        && getAfter(/databases/$(database)/documents/field_expenses/$(data.sourceId)).data.tanggal == data.tanggal
+        && getAfter(/databases/$(database)/documents/field_expenses/$(data.sourceId)).data.amount == data.amount
+        && getAfter(/databases/$(database)/documents/field_expenses/$(data.sourceId)).data.deletedAt == data.deletedAt;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow write: if false;
+    }
+
+    match /mitra/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && validMitra(request.resource.data) && ownsAudit(request.resource.data);
+      allow update: if isStaff()
+        && keepsCreateAudit()
+        && validMitra(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /collections/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && validCollection(request.resource.data) && ownsAudit(request.resource.data);
+      allow update: if isStaff()
+        && keepsCreateAudit()
+        && validCollection(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /inventory_movements/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && validMovement(request.resource.data) && ownsAudit(request.resource.data);
+      allow update: if isStaff()
+        && keepsCreateAudit()
+        && validMovement(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /field_expenses/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && validFieldExpense(request.resource.data) && ownsAudit(request.resource.data);
+      allow update: if isStaff()
+        && keepsCreateAudit()
+        && validFieldExpense(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    match /transactions/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && validTransaction(request.resource.data)
+        && ownsAudit(request.resource.data);
+      allow create: if isStaff()
+        && validTransaction(request.resource.data)
+        && ownsAudit(request.resource.data)
+        && matchesFieldExpenseTransaction(request.resource.data, id);
+      allow update: if isAdmin()
+        && resource.data.sourceType == "manual"
+        && keepsCreateAudit()
+        && validTransaction(request.resource.data)
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isStaff()
+        && resource.data.sourceType == "field_expense"
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && validTransaction(request.resource.data)
+        && request.resource.data.updatedAt == request.time
+        && matchesFieldExpenseTransaction(request.resource.data, id);
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
